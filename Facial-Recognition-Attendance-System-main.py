@@ -10,8 +10,8 @@ from PIL import Image, ImageTk
 from datetime import datetime, timedelta
 import face_recognition
 import warnings
+import time  # [THÊM] Thư viện đo thời gian
 
-# Tắt cảnh báo lỗi thời của thư viện để console sạch sẽ
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # ================= CẤU HÌNH HỆ THỐNG =================
@@ -32,26 +32,22 @@ def init_db():
     conn.close()
 
 def reload_face_data():
-    """Đồng bộ hóa dữ liệu từ Dataset, Cache và RAM"""
     global known_encodings, known_ids, known_names
     
     if not os.path.exists(DATASET_PATH): os.makedirs(DATASET_PATH)
     all_files = [f for f in os.listdir(DATASET_PATH) if f.endswith((".jpg", ".png"))]
 
-    # Nếu không có ảnh nào -> Xóa sạch dữ liệu cũ
     if not all_files:
         known_encodings, known_ids, known_names = [], [], []
         if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
         print(">>> Hệ thống trống dữ liệu.")
         return
 
-    # Kiểm tra Cache
     need_recompute = True
     if os.path.exists(CACHE_FILE):
         try:
             with open(CACHE_FILE, 'rb') as f:
                 data = pickle.load(f)
-                # Chỉ nạp nếu số lượng ảnh trong cache khớp với thực tế
                 if len(data["ids"]) == len(all_files):
                     known_encodings = data["encodings"]
                     known_ids = data["ids"]
@@ -92,10 +88,16 @@ class UltimateAttendanceApp:
         self.is_monitoring = True
         self.results = []
         self.lock = threading.Lock()
-        self.tracking_info = {} # {id: [last_x, last_time]}
+        self.tracking_info = {} 
         self.frame_count = 0
 
-        # Tabs
+        # --- [THÊM] BIẾN ĐO HIỆU NĂNG ---
+        self.prev_frame_time = 0
+        self.new_frame_time = 0
+        self.ai_latency = 0
+        self.current_fps = 0
+        # -------------------------------
+
         self.notebook = ttk.Notebook(self.window)
         self.tab_mon = tk.Frame(self.notebook)
         self.tab_admin = tk.Frame(self.notebook)
@@ -109,9 +111,13 @@ class UltimateAttendanceApp:
         self.update_main()
 
     def setup_mon_ui(self):
+        # Giữ nguyên code gốc phần giao diện
         self.mon_left = tk.Frame(self.tab_mon, bg="black"); self.mon_left.pack(side="left", fill="both", expand=True)
         self.video_label = tk.Label(self.mon_left, bg="black"); self.video_label.pack(fill="both", expand=True)
         self.mon_right = tk.Frame(self.tab_mon, width=300); self.mon_right.pack(side="right", fill="both", padx=10)
+        
+        # [ĐÃ XÓA] Dòng lệnh gây lỗi layout bind('<Configure>') ở đây
+        
         tk.Label(self.mon_right, text="LỊCH SỬ RA VÀO", font=("Arial", 12, "bold")).pack(pady=10)
         self.tree_log = ttk.Treeview(self.mon_right, columns=("t","n","d"), show="headings")
         self.tree_log.heading("t", text="Giờ"); self.tree_log.heading("n", text="Tên"); self.tree_log.heading("d", text="Hướng")
@@ -126,13 +132,20 @@ class UltimateAttendanceApp:
         self.tree_emp.heading("id", text="ID"); self.tree_emp.heading("name", text="Tên"); self.tree_emp.heading("img", text="Dữ liệu")
         self.tree_emp.pack(fill="both", expand=True, padx=20, pady=10); self.refresh_table()
 
-    # ---------------- GIÁM SÁT (MULTI-THREADING) ----------------
     def update_main(self):
         if self.is_monitoring:
             ret, frame = self.cap.read()
             if ret:
                 self.frame_count += 1
-                # Chạy nhận diện mỗi 4 khung hình để giảm tải CPU
+                
+                # --- [THÊM] TÍNH FPS ---
+                self.new_frame_time = time.time()
+                diff = self.new_frame_time - self.prev_frame_time
+                if diff > 0:
+                    self.current_fps = 1 / diff
+                self.prev_frame_time = self.new_frame_time
+                # -----------------------
+
                 if self.frame_count % 4 == 0:
                     threading.Thread(target=self.process_ai, args=(frame.copy(),), daemon=True).start()
                 
@@ -144,11 +157,12 @@ class UltimateAttendanceApp:
         self.window.after(10, self.update_main)
 
     def process_ai(self, frame):
-        # Resize ảnh nhỏ để xử lý nhanh
+        # --- [THÊM] ĐO LATENCY ---
+        start_time = time.time()
+        
         small = cv2.resize(frame, (0,0), fx=0.2, fy=0.2)
         rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         
-        # Tìm mặt và mã hóa
         locs = face_recognition.face_locations(rgb, model="hog")
         encs = face_recognition.face_encodings(rgb, locs)
         
@@ -165,7 +179,6 @@ class UltimateAttendanceApp:
                     idx = matches.index(True)
                     uid, uname = known_ids[idx], known_names[idx]
                     
-                    # Logic xác định hướng (Tracking)
                     curr_x = l * 5
                     if uid in self.tracking_info:
                         lx, lt = self.tracking_info[uid]
@@ -180,13 +193,26 @@ class UltimateAttendanceApp:
                         self.tracking_info[uid] = [curr_x, datetime.now() - timedelta(seconds=COOLDOWN_SECONDS)]
 
             new_res.append({"box": (t*5, r*5, b*5, l*5), "name": uname})
-            
+        
+        # --- [THÊM] CẬP NHẬT LATENCY ---
+        end_time = time.time()
+        self.ai_latency = (end_time - start_time) * 1000 
+        
         with self.lock:
             self.results = new_res
 
     def draw_overlay(self, frame):
         line_x = frame.shape[1] // 2
         cv2.line(frame, (line_x, 0), (line_x, 600), (0,0,255), 2)
+        
+        # --- [THÊM] HIỂN THỊ FPS & LATENCY ---
+        cv2.rectangle(frame, (5, 5), (250, 80), (0, 0, 0), -1)
+        cv2.putText(frame, f"FPS: {int(self.current_fps)}", (15, 35), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(frame, f"Latency: {int(self.ai_latency)} ms", (15, 65), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # -------------------------------------
+
         with self.lock:
             for res in self.results:
                 t,r,b,l = res["box"]
@@ -201,13 +227,11 @@ class UltimateAttendanceApp:
         c.execute("INSERT INTO attendance (user_id, type, time) VALUES (?,?,?)", (uid, dir, t.strftime("%Y-%m-%d %H:%M:%S")))
         conn.commit(); conn.close()
 
-    # ---------------- ĐĂNG KÝ THÔNG MINH (CHỐNG TRÙNG & AUTO CAPTURE) ----------------
     def smart_register(self):
         self.is_monitoring = False; self.cap.release(); cv2.destroyAllWindows()
         name = simpledialog.askstring("Đăng ký", "Họ tên nhân viên:", parent=self.window)
         if not name: self.resume_mon(); return
 
-        # 1. Kiểm tra trùng TÊN
         conn = sqlite3.connect(DB_PATH); c = conn.cursor()
         c.execute("SELECT id FROM employees WHERE name=?", (name,))
         if c.fetchone():
@@ -223,7 +247,6 @@ class UltimateAttendanceApp:
             ret, f = temp_cap.read()
             if not ret: break
             
-            # Kiểm tra trùng MẶT ở tấm ảnh đầu tiên
             if count == 0:
                 rgb_test = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
                 enc_test = face_recognition.face_encodings(rgb_test)
@@ -231,7 +254,6 @@ class UltimateAttendanceApp:
                     if any(face_recognition.compare_faces(known_encodings, enc_test[0], 0.4)):
                         messagebox.showerror("Lỗi", "Khuôn mặt này đã được đăng ký trước đó!"); break
 
-            # Tự động chụp mỗi 200ms khi thấy mặt
             if (datetime.now() - last_save).microseconds > 200000:
                 locs = face_recognition.face_locations(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
                 if locs:
@@ -239,7 +261,6 @@ class UltimateAttendanceApp:
                     cv2.imwrite(f"{DATASET_PATH}/{new_id}_{name}_{count}.jpg", f)
                     last_save = datetime.now()
 
-            # Vẽ Progress Bar
             cv2.rectangle(f, (50, 400), (590, 430), (50,50,50), -1)
             cv2.rectangle(f, (50, 400), (50 + int(count * 18), 430), (0,255,0), -1)
             cv2.putText(f, f"Capturing: {count}/30", (60, 390), 1, 1.2, (255,255,255), 2)
@@ -271,10 +292,8 @@ class UltimateAttendanceApp:
             conn = sqlite3.connect(DB_PATH); c = conn.cursor()
             c.execute("DELETE FROM employees WHERE id=?", (uid,))
             conn.commit(); conn.close()
-            # Xóa ảnh vật lý
             for f in os.listdir(DATASET_PATH):
                 if f.startswith(f"{uid}_"): os.remove(os.path.join(DATASET_PATH, f))
-            # BUỘC HỆ THỐNG XÓA CACHE VÀ NẠP LẠI
             if os.path.exists(CACHE_FILE): os.remove(CACHE_FILE)
             reload_face_data(); self.refresh_table()
 

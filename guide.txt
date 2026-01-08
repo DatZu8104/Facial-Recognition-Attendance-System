@@ -1,5 +1,5 @@
 .\.venv\Scripts\Activate.ps1
 pip install opencv-python dlib-bin face_recognition numpy Pillow
  python Facial-Recognition-Attendance-System-main.py
-
+python evaluate_model.py
 
