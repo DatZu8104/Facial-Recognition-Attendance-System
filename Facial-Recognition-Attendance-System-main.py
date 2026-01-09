@@ -79,13 +79,13 @@ def reload_face_data():
 class UltimateAttendanceApp:
     def __init__(self, window):
         self.window = window
-        self.window.title("Hệ Thống Chấm Công Thông Minh (MediaPipe)")
+        self.window.title("Hệ Thống Chấm Công")
         self.window.geometry("1200x700")
 
         init_db()
         reload_face_data()
 
-        # [MỚI] Khởi tạo MediaPipe Face Detection
+        #Khởi tạo MediaPipe Face Detection
         self.mp_face_detection = mp.solutions.face_detection
         self.face_detector = self.mp_face_detection.FaceDetection(min_detection_confidence=0.6)
 
@@ -174,7 +174,6 @@ class UltimateAttendanceApp:
     def process_ai(self, frame):
         start_time = time.time()
         
-        # [SỬA] Sử dụng MediaPipe để detect khuôn mặt thay vì HOG
         # MediaPipe nhận ảnh RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.face_detector.process(rgb_frame)
@@ -242,7 +241,7 @@ class UltimateAttendanceApp:
         cv2.rectangle(frame, (5, 5), (250, 80), (0, 0, 0), -1)
         cv2.putText(frame, f"FPS: {int(self.current_fps)}", (15, 35), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(frame, f"Latency: {int(self.ai_latency)} ms (MediaPipe)", (15, 65), 
+        cv2.putText(frame, f"Latency: {int(self.ai_latency)}", (15, 65), 
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
         with self.lock:
